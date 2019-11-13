@@ -10,6 +10,7 @@ parser = argparse.ArgumentParser(
 parser.add_argument("--data_dir", default='data/mturk', type=str)
 parser.add_argument("--classification_data", default='data/mturk/classification.csv', type=str)
 parser.add_argument("--annotation_data", default='data/mturk/annotation.manifest', type=str)
+parser.add_argument("--anno_task_name", default='retail-data', type=str)
 parser.add_argument("--num_annotators", default=3, type=str)
 parser.add_argument("--dataset_name", default='mturk', type=str)
 parser.add_argument("--work_dir", default='outputs', type=str)
@@ -23,16 +24,32 @@ if not os.path.exists(args.classification_data):
 
 work_dir = f'{args.work_dir}/{args.dataset_name.upper()}'
 
+
+def readCSV(file_path):
+    rows = []
+    with open(file_path, 'r') as csvfile:
+        readCSV = csv.reader(csvfile, delimiter=',')
+        for row in readCSV:
+            rows.append(row)
+    return rows
+
+
+
 # TO DO  Change data_dir to classification data
 utterances = []
 
 outfold = f'{args.data_dir}/mturk/nemo-processed'
 os.makedirs(outfold, exist_ok=True)
 
-with open(args.classification_data, 'r') as csvfile:
-    readCSV = csv.reader(csvfile, delimiter=',')
-    for row in readCSV:
-        utterances.append(row)
+# with open(args.classification_data, 'r') as csvfile:
+#     readCSV = csv.reader(csvfile, delimiter=',')
+#     for row in readCSV:
+#         utterances.append(row)
+
+utterances = readCSV(args.classification_data)
+
+
+
 
 def analyze_inter_annotator_agreement(num_annotators, utterances, use_two_agreed=False):
     print("Agreement here")
@@ -54,6 +71,21 @@ def analyze_inter_annotator_agreement(num_annotators, utterances, use_two_agreed
     intent_names = {}
     intent_count = 0
 
+    agreedallDict = {}
+    agreedallDict2 = {}
+
+    approve_flag = False
+
+    intent_labels = []
+    print('Printing all intent_labels')
+    intent_dict = f'{outfold}/dict.intents.csv'
+    if os.path.exists(intent_dict):
+        with open(intent_dict, 'r') as f:
+            for intent_name in f.readlines():
+                intent_names[intent_name.strip()] = str(intent_count)
+                intent_count += 1
+    print(intent_names)
+
 
 
     for i, utterance in enumerate(utterances[1:]):
@@ -64,6 +96,10 @@ def analyze_inter_annotator_agreement(num_annotators, utterances, use_two_agreed
             else:
                 classDict[utterance[1]] = classDict.get(utterance[1]) + 1
             size -= 1
+            # print(utterance)
+        if approve_flag and utterance[2] == 'x':
+            if utterance[1] not in agreedallDict2:
+                agreedallDict2[utterance[0]] = utterance[1]
         if size == 0:
             if len(classes) == 1:
                 agreedall.append([utterance[0], classes[0]])
@@ -86,9 +122,9 @@ def analyze_inter_annotator_agreement(num_annotators, utterances, use_two_agreed
 
             size = num_annotators
             classes = []
-        if utterance[1] not in intent_names:
-            intent_names[utterance[1]] = str(intent_count)
-            intent_count += 1
+        # if utterance[1] not in intent_names:
+        #     intent_names[utterance[1]] = str(intent_count)
+        #     intent_count += 1
 
     print(len(agreedall))
     print(len(agreedtwo)) # + len(agreedall))
@@ -100,10 +136,14 @@ def analyze_inter_annotator_agreement(num_annotators, utterances, use_two_agreed
     print(agreedtwo[:10])
     print("No agreement")
     print(disagreedall[:10])
+    print('x eval mechanism:')
+    print(len(agreedallDict2))
 
-    agreedallDict = {}
-
-    agreedallDict.update(agreedall)
+    
+    if approve_flag:
+        agreedallDict = agreedallDict2
+    else:
+        agreedallDict.update(agreedall)
 
     # print(len(agreedallDict))
     # print(agreedallDict.get('How many point do I need before my first reward?'))
@@ -111,50 +151,64 @@ def analyze_inter_annotator_agreement(num_annotators, utterances, use_two_agreed
     return agreedall, agreedallDict, intent_names
 
 
-def get_slot_labels(slot_annotations):
+def get_slot_labels(slot_annotations, task_name):
 
     slot_labels = json.loads(slot_annotations[0])
 
     all_labels = {}
     count = 0
-    for label in slot_labels['retail-test']['annotations']['labels']:
-        all_labels[label['label']] = str(count)
+    # Generating labels with the IOB format.
+    for label in slot_labels[task_name]['annotations']['labels']:
+        b_slot = ''.join(["B-", label['label']])
+        i_slot = ''.join(["I-", label['label']])
+        all_labels[b_slot] = str(count)
+        count += 1
+        all_labels[i_slot] = str(count)
         count += 1
     all_labels['O'] = str(count)
 
     return all_labels
 
 
-def process_intent_slot(slot_annotations, agreedallDict, intent_names):
+def process_intent_slot(slot_annotations, agreedallDict, intent_names, task_name):
 
     slot_tags = []
     inorder_utterances = []
-    all_labels = get_slot_labels(slot_annotations)
-    print(len(agreedallDict))
+    all_labels = get_slot_labels(slot_annotations, task_name)
+    print(f'agreedallDict - {len(agreedallDict)}')
+    print(f'Slot annotations - {len(slot_annotations)}')
 
 
     for annotation in slot_annotations[0:]:
         an = json.loads(annotation)
         utterance = an['source']
+        if utterance.startswith('"') and utterance.endswith('"'):
+            utterance = utterance[1:-1]
 
         if utterance in agreedallDict:
             entities = {}
             
             # TO DO - Change the below name (retail-test) :
-            for i, each_anno in enumerate(an['retail-test']['annotations']['entities']):
+            for i, each_anno in enumerate(an[task_name]['annotations']['entities']):
                 entities[int(each_anno['startOffset'])] = i
 
             lastptr = 0
             slots = ""
             #sorting annotations by the start offset
             for i in sorted(entities.keys()):
-                tags = an['retail-test']['annotations']['entities'][entities.get(i)]
+                tags = an[task_name]['annotations']['entities'][entities.get(i)]
                 untagged_words = utterance[lastptr:tags['startOffset']] #utterance.substr(lastptr, tags['startOffset'])
                 for word in untagged_words.split():
                     slots = ' '.join([slots, all_labels.get('O')])
                 anno_words = utterance[tags['startOffset']:tags['endOffset']]
-                for word in anno_words.split():
-                    slots = ' '.join([slots, all_labels.get(tags['label'])])
+                # tagging with the IOB format.
+                for i, word in enumerate(anno_words.split()):
+                    if i == 0:
+                        b_slot = ''.join(["B-", tags['label']])
+                        slots = ' '.join([slots, all_labels.get(b_slot)])
+                    else:
+                        i_slot = ''.join(["I-", tags['label']])
+                        slots = ' '.join([slots, all_labels.get(i_slot)])
                 lastptr = tags['endOffset']
 
             untagged_words = utterance[lastptr:len(utterance)]
@@ -165,7 +219,9 @@ def process_intent_slot(slot_annotations, agreedallDict, intent_names):
             intent_num = intent_names.get(agreedallDict.get(utterance))
             querytext = f'{utterance.strip()}\t{intent_num}\n'
             inorder_utterances.append(querytext)
-    print(len(inorder_utterances))
+        # else:
+        #     print(utterance)
+    print(f'inorder utterances - {len(inorder_utterances)}')
 
     return all_labels, inorder_utterances, slot_tags
 
@@ -195,8 +251,10 @@ def write_files(data, outfile):
             item = f'{item.strip()}\n'
             f.write(item)
 
-use_two_agreed = False
 
+task_name = args.anno_task_name
+
+use_two_agreed = False
 agreedall, agreedallDict, intent_names = analyze_inter_annotator_agreement(
     args.num_annotators, 
     utterances, 
@@ -208,7 +266,8 @@ with open(args.annotation_data, 'r') as f:
 slot_labels, intent_queries, slot_tags = process_intent_slot(
         slot_annotations, 
         agreedallDict, 
-        intent_names)
+        intent_names,
+        task_name)
 
 assert len(slot_tags) == len(intent_queries)
 
@@ -217,8 +276,10 @@ assert len(slot_tags) == len(intent_queries)
 #     print(slot_tags[i])
 #     print("--------------------------")
 
+# print(slot_labels)
 
-dev_split = 0.1
+
+dev_split = 0.3
 
 train_queries, train_slots, test_queries, test_slots = \
     partition_data(intent_queries, slot_tags, split=dev_split)
